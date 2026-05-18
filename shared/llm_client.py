@@ -48,12 +48,16 @@ def call_llm(
                 **kwargs,
             )
             content = resp.choices[0].message.content
-            logger.info("LLM call ok model=%s tokens≈%d", model, len(content))
+            tokens = getattr(getattr(resp, "usage", None), "completion_tokens", "?")
+            logger.info("LLM call ok model=%s completion_tokens=%s", model, tokens)
             return content
         except Exception as e:
             last_err = e
             wait = 2**attempt
-            logger.warning("LLM call failed (attempt %d): %s; retrying in %ds", attempt + 1, e, wait)
+            logger.warning(
+                "LLM call failed (attempt %d) [%s]: %s; retrying in %ds",
+                attempt + 1, type(e).__name__, e, wait,
+            )
             time.sleep(wait)
 
     raise LLMError(f"LLM call failed after {max_retries} attempts: {last_err}")
