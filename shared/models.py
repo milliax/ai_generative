@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 Urgency = Literal["normal", "rush", "emergency"]
 
@@ -21,7 +21,7 @@ class OrderRequest(BaseModel):
 class OrderSpec(BaseModel):
     """Order Intake agent 解析後的結構化規格。"""
 
-    cpu_sku: str
+    cpu_sku: str = Field(min_length=1)
     memory_gb: int = Field(gt=0)
     storage_tb: int = Field(ge=0)
     chassis: str
@@ -37,7 +37,7 @@ class AgentMessage(BaseModel):
     from_agent: str
     to_agent: str | None = None
     payload: dict[str, Any]
-    reasoning: str
+    reasoning: str = Field(min_length=1)
 
 
 class CoordinationPlan(BaseModel):
@@ -52,3 +52,10 @@ class CoordinationPlan(BaseModel):
     reference_orders: list[dict[str, Any]]
     risks: list[str]
     next_actions: list[str]
+
+    @model_validator(mode="after")
+    def _check_price_confidence_order(self) -> "CoordinationPlan":
+        low, high = self.price_confidence
+        if low > high:
+            raise ValueError(f"price_confidence must be (low, high) — got ({low}, {high})")
+        return self

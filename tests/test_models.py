@@ -70,3 +70,46 @@ def test_coordination_plan_minimal():
     )
     assert plan.estimated_price == 100000.0
     assert len(plan.reference_orders) == 1
+
+
+def test_order_spec_rejects_zero_memory():
+    with pytest.raises(ValidationError):
+        OrderSpec(
+            cpu_sku="X", memory_gb=0, storage_tb=1, chassis="1U",
+            quantity=1, requested_delivery=date.today(),
+            spec_diff={}, urgency="normal",
+        )
+
+
+def test_order_spec_rejects_zero_quantity():
+    with pytest.raises(ValidationError):
+        OrderSpec(
+            cpu_sku="X", memory_gb=1, storage_tb=1, chassis="1U",
+            quantity=0, requested_delivery=date.today(),
+            spec_diff={}, urgency="normal",
+        )
+
+
+def test_order_spec_rejects_empty_cpu_sku():
+    with pytest.raises(ValidationError):
+        OrderSpec(
+            cpu_sku="", memory_gb=1, storage_tb=1, chassis="1U",
+            quantity=1, requested_delivery=date.today(),
+            spec_diff={}, urgency="normal",
+        )
+
+
+def test_coordination_plan_rejects_inverted_confidence():
+    from pydantic import ValidationError as VE
+    with pytest.raises(VE):
+        CoordinationPlan(
+            estimated_price=100.0,
+            price_confidence=(200.0, 100.0),  # inverted!
+            estimated_delivery=date(2026, 8, 1),
+            carbon_footprint_kg=10.0,
+            capacity_status="OK",
+            alternative_suppliers=[],
+            reference_orders=[],
+            risks=[],
+            next_actions=[],
+        )
