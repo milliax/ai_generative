@@ -67,3 +67,37 @@
 
 - 第一版 README、CLAUDE.md、設計 spec 都根據本次討論建立
 - 沒有需要回頭修改的段落
+
+---
+
+## 後續：W1 implementation plan 完成（同日）
+
+**決定：** 把 3 週工作切成 3 個獨立 plans，W1 先寫。
+
+**W1 Plan 路徑：** [`docs/superpowers/plans/2026-05-18-w1-scaffold.md`](../superpowers/plans/2026-05-18-w1-scaffold.md)
+
+**W1 範圍（10 個 tasks，TDD 流程）：**
+1. Repo skeleton + deps（PM）
+2. Pydantic schemas（PM，**blocker**）
+3. LiteLLM client wrapper（PM，**blocker**）
+4. BaseAgent class（Agent 組）
+5. 4 個 specialist agents stub（Agent 組，2 人並行）
+6. LangGraph orchestrator（Agent 組）
+7. Mock data generator（估價組）
+8. ChromaDB ingest + retrieval（估價組）
+9. Streamlit UI scaffold（UI）
+10. End-to-end smoke test（PM）
+
+**設計重點：**
+- W1 所有 agents 回 **canned response**（不真的呼叫 LLM 也能跑），W2 時把 mock 拔掉換真 LLM
+- 但保留真實 prompt 結構在 `PROMPT = """..."""` 常數
+- Pricing 用 `memory_gb × quantity × 100` 假公式；W2 換成 RAG + LLM 推理
+- Capacity 用 `quantity × hours_per_chassis` 判 overload；W2 接 mock IoT stream
+
+**Push 到 GitHub：** `git@github.com:milliax/ai_generative.git`，branch = main
+
+**待辦：**
+- [ ] 確認 PM 人選
+- [ ] 5/19 前找老師確認資料欄位
+- [ ] 邀請 5 個隊友加 GitHub repo collaborator
+- [ ] 隊友 review W1 plan，回饋 task 切分是否合理
