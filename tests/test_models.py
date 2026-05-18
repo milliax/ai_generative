@@ -2,7 +2,7 @@ from datetime import date, datetime
 import pytest
 from pydantic import ValidationError
 from shared.models import (
-    OrderRequest, OrderSpec, AgentMessage, CoordinationPlan, Urgency
+    OrderRequest, OrderSpec, AgentMessage, CoordinationPlan,
 )
 
 
@@ -108,6 +108,21 @@ def test_coordination_plan_rejects_inverted_confidence():
             estimated_delivery=date(2026, 8, 1),
             carbon_footprint_kg=10.0,
             capacity_status="OK",
+            alternative_suppliers=[],
+            reference_orders=[],
+            risks=[],
+            next_actions=[],
+        )
+
+
+def test_coordination_plan_rejects_bad_capacity_status():
+    with pytest.raises(ValidationError):
+        CoordinationPlan(
+            estimated_price=100.0,
+            price_confidence=(90.0, 110.0),
+            estimated_delivery=date(2026, 8, 1),
+            carbon_footprint_kg=10.0,
+            capacity_status="MAYBE",  # not in Literal
             alternative_suppliers=[],
             reference_orders=[],
             risks=[],

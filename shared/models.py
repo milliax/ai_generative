@@ -7,6 +7,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
 Urgency = Literal["normal", "rush", "emergency"]
+CapacityStatus = Literal["OK", "OVERLOAD"]
 
 
 class OrderRequest(BaseModel):
@@ -47,7 +48,7 @@ class CoordinationPlan(BaseModel):
     price_confidence: tuple[float, float]
     estimated_delivery: date
     carbon_footprint_kg: float
-    capacity_status: str
+    capacity_status: CapacityStatus
     alternative_suppliers: list[dict[str, Any]]
     reference_orders: list[dict[str, Any]]
     risks: list[str]
