@@ -125,3 +125,14 @@ streamlit run ui/streamlit_app.py
 ## 八、討論記錄
 
 所有設計決定都記錄在 [`docs/discussions/`](docs/discussions/)。新加入的隊員請從第一筆讀起。
+
+## 九、各組工作指南
+
+每個角色的詳細任務、檔案、規則：[`docs/team/`](docs/team/)
+
+| 角色 | 文件 |
+|---|---|
+| PM / 統整 | [docs/team/pm.md](docs/team/pm.md) |
+| Agent 編排（2 人） | [docs/team/agents.md](docs/team/agents.md) |
+| 估價 / RAG（2 人） | [docs/team/pricing.md](docs/team/pricing.md) |
+| UI / Demo | [docs/team/ui.md](docs/team/ui.md) |
