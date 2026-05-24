@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import csv
 import os
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -159,18 +160,6 @@ class HistoricalOrderRecord:
         }
 
 
-@dataclass(frozen=True, slots=True)
-class HistoricalOrderDataset:
-    """Validated historical order dataset loaded from CSV."""
-
-    source_path: Path
-    records: tuple[HistoricalOrderRecord, ...]
-
-    def __len__(self) -> int:
-        """Return the number of records in the dataset."""
-        return len(self.records)
-
-
 def _require_text(
     row: dict[str, str],
     column: str,
@@ -267,14 +256,17 @@ def resolve_persist_dir(persist_dir: str | Path | None = None) -> Path:
     return DEFAULT_CHROMA_PERSIST_DIR
 
 
-def load_historical_order_dataset(csv_path: str | Path) -> HistoricalOrderDataset:
-    """Load and validate historical order records from a CSV file.
+def iter_historical_order_records(csv_path: str | Path) -> Iterator[HistoricalOrderRecord]:
+    """Stream and validate historical order records from a CSV file.
+
+    This function validates rows while iterating and stores only seen order IDs
+    for duplicate detection. It does not keep the entire dataset in memory.
 
     Args:
         csv_path: Path to a normalized historical order CSV file.
 
-    Returns:
-        A validated historical order dataset.
+    Yields:
+        Validated historical order records.
 
     Raises:
         FileNotFoundError: If the CSV file does not exist.
@@ -296,31 +288,40 @@ def load_historical_order_dataset(csv_path: str | Path) -> HistoricalOrderDatase
                 + ", ".join(missing_columns)
             )
 
-        records = tuple(
-            HistoricalOrderRecord.from_csv_row(row, row_number)
-            for row_number, row in enumerate(reader, start=2)
-        )
+        seen_order_ids: set[str] = set()
+        row_count = 0
 
-    if not records:
-        raise HistoricalOrderDataError(f"Historical order CSV contains no rows: {path}")
+        for row_number, row in enumerate(reader, start=2):
+            row_count += 1
+            record = HistoricalOrderRecord.from_csv_row(row, row_number)
 
-    _validate_unique_order_ids(records)
+            if record.order_id in seen_order_ids:
+                raise HistoricalOrderDataError(
+                    f"Duplicate order_id values found: {record.order_id}"
+                )
 
-    return HistoricalOrderDataset(source_path=path, records=records)
+            seen_order_ids.add(record.order_id)
+            yield record
+
+        if row_count == 0:
+            raise HistoricalOrderDataError(
+                f"Historical order CSV contains no rows: {path}"
+            )
 
 
-def _validate_unique_order_ids(records: tuple[HistoricalOrderRecord, ...]) -> None:
-    seen_order_ids: set[str] = set()
-    duplicate_order_ids: set[str] = set()
+def validate_historical_order_csv(csv_path: str | Path) -> int:
+    """Validate a historical order CSV without storing all records in memory.
 
-    for record in records:
-        if record.order_id in seen_order_ids:
-            duplicate_order_ids.add(record.order_id)
-        seen_order_ids.add(record.order_id)
+    Args:
+        csv_path: Path to a normalized historical order CSV file.
 
-    if duplicate_order_ids:
-        duplicates = ", ".join(sorted(duplicate_order_ids))
-        raise HistoricalOrderDataError(f"Duplicate order_id values found: {duplicates}")
+    Returns:
+        Number of valid historical order records.
+    """
+    count = 0
+    for _record in iter_historical_order_records(csv_path):
+        count += 1
+    return count
 
 
 def get_chroma_client(persist_dir: str | Path | None = None):
@@ -348,10 +349,10 @@ def reset_collection_if_exists(client, collection_name: str) -> None:
 
 
 def batched(
-    records: tuple[HistoricalOrderRecord, ...],
+    records: Iterable[HistoricalOrderRecord],
     batch_size: int,
-) -> list[tuple[HistoricalOrderRecord, ...]]:
-    """Split records into batches.
+) -> Iterator[tuple[HistoricalOrderRecord, ...]]:
+    """Yield records in fixed-size batches.
 
     Args:
         records: Historical order records.
@@ -363,10 +364,16 @@ def batched(
     if batch_size < 1:
         raise ValueError("batch_size must be greater than or equal to 1")
 
-    return [
-        records[index : index + batch_size]
-        for index in range(0, len(records), batch_size)
-    ]
+    batch: list[HistoricalOrderRecord] = []
+
+    for record in records:
+        batch.append(record)
+        if len(batch) == batch_size:
+            yield tuple(batch)
+            batch.clear()
+
+    if batch:
+        yield tuple(batch)
 
 
 def ingest_orders_to_chroma(
@@ -391,7 +398,7 @@ def ingest_orders_to_chroma(
     Returns:
         Number of ingested historical order records.
     """
-    dataset = load_historical_order_dataset(csv_path)
+    record_count = validate_historical_order_csv(csv_path)
     provider = embedding_provider or SentenceTransformerEmbeddingProvider()
     client = get_chroma_client(persist_dir)
 
@@ -403,7 +410,10 @@ def ingest_orders_to_chroma(
         metadata={"hnsw:space": "cosine"},
     )
 
-    for record_batch in batched(dataset.records, batch_size=batch_size):
+    for record_batch in batched(
+        iter_historical_order_records(csv_path),
+        batch_size=batch_size,
+    ):
         documents = [record.document for record in record_batch]
         embeddings = provider.embed_documents(documents)
         ids = [record.order_id for record in record_batch]
@@ -416,7 +426,7 @@ def ingest_orders_to_chroma(
             metadatas=metadatas,
         )
 
-    return len(dataset)
+    return record_count
 
 
 def parse_args() -> argparse.Namespace:

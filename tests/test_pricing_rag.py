@@ -9,7 +9,8 @@ from pricing.ingest import (
     HistoricalOrderDataError,
     batched,
     ingest_orders_to_chroma,
-    load_historical_order_dataset,
+    iter_historical_order_records,
+    validate_historical_order_csv,
 )
 from pricing.retrieval import (
     compute_final_score,
@@ -123,14 +124,14 @@ def sample_order_rows() -> list[dict[str, str]]:
     ]
 
 
-def test_load_historical_order_dataset_rejects_missing_file(tmp_path):
+def test_iter_historical_order_records_rejects_missing_file(tmp_path):
     missing_path = tmp_path / "missing.csv"
 
     with pytest.raises(FileNotFoundError):
-        load_historical_order_dataset(missing_path)
+        list(iter_historical_order_records(missing_path))
 
 
-def test_load_historical_order_dataset_rejects_missing_required_columns(tmp_path):
+def test_iter_historical_order_records_rejects_missing_required_columns(tmp_path):
     csv_path = tmp_path / "bad_orders.csv"
 
     with csv_path.open("w", newline="", encoding="utf-8") as csv_file:
@@ -139,10 +140,10 @@ def test_load_historical_order_dataset_rejects_missing_required_columns(tmp_path
         writer.writerow({"order_id": "BAD-001", "customer": "AWS"})
 
     with pytest.raises(HistoricalOrderDataError, match="missing required columns"):
-        load_historical_order_dataset(csv_path)
+        list(iter_historical_order_records(csv_path))
 
 
-def test_load_historical_order_dataset_rejects_empty_file(tmp_path):
+def test_iter_historical_order_records_rejects_empty_file(tmp_path):
     csv_path = tmp_path / "empty_orders.csv"
 
     with csv_path.open("w", newline="", encoding="utf-8") as csv_file:
@@ -150,10 +151,10 @@ def test_load_historical_order_dataset_rejects_empty_file(tmp_path):
         writer.writeheader()
 
     with pytest.raises(HistoricalOrderDataError, match="contains no rows"):
-        load_historical_order_dataset(csv_path)
+        list(iter_historical_order_records(csv_path))
 
 
-def test_load_historical_order_dataset_rejects_invalid_numeric_value(
+def test_iter_historical_order_records_rejects_invalid_numeric_value(
     tmp_path,
     sample_order_rows,
 ):
@@ -164,10 +165,10 @@ def test_load_historical_order_dataset_rejects_invalid_numeric_value(
     write_orders_csv(csv_path, rows)
 
     with pytest.raises(HistoricalOrderDataError, match="Row 2"):
-        load_historical_order_dataset(csv_path)
+        list(iter_historical_order_records(csv_path))
 
 
-def test_load_historical_order_dataset_rejects_invalid_date_value(
+def test_iter_historical_order_records_rejects_invalid_date_value(
     tmp_path,
     sample_order_rows,
 ):
@@ -178,10 +179,10 @@ def test_load_historical_order_dataset_rejects_invalid_date_value(
     write_orders_csv(csv_path, rows)
 
     with pytest.raises(HistoricalOrderDataError, match="YYYY-MM-DD"):
-        load_historical_order_dataset(csv_path)
+        list(iter_historical_order_records(csv_path))
 
 
-def test_load_historical_order_dataset_rejects_duplicate_order_ids(
+def test_iter_historical_order_records_rejects_duplicate_order_ids(
     tmp_path,
     sample_order_rows,
 ):
@@ -192,25 +193,35 @@ def test_load_historical_order_dataset_rejects_duplicate_order_ids(
     write_orders_csv(csv_path, rows)
 
     with pytest.raises(HistoricalOrderDataError, match="Duplicate order_id"):
-        load_historical_order_dataset(csv_path)
+        list(iter_historical_order_records(csv_path))
 
 
-def test_load_historical_order_dataset_returns_validated_records(
+def test_iter_historical_order_records_returns_validated_records(
     tmp_path,
     sample_order_rows,
 ):
     csv_path = write_orders_csv(tmp_path / "orders.csv", sample_order_rows)
 
-    dataset = load_historical_order_dataset(csv_path)
+    records = list(iter_historical_order_records(csv_path))
 
-    assert len(dataset) == 3
-    assert dataset.source_path == csv_path
-    assert dataset.records[0].order_id == "HIST-001"
-    assert dataset.records[0].memory_gb == 512
-    assert dataset.records[0].storage_tb == 20
-    assert dataset.records[0].quantity == 1000
-    assert dataset.records[0].final_price == 4200000.0
-    assert dataset.records[0].carbon_kg == 180000.0
+    assert len(records) == 3
+    assert records[0].order_id == "HIST-001"
+    assert records[0].memory_gb == 512
+    assert records[0].storage_tb == 20
+    assert records[0].quantity == 1000
+    assert records[0].final_price == 4200000.0
+    assert records[0].carbon_kg == 180000.0
+
+
+def test_validate_historical_order_csv_returns_record_count(
+    tmp_path,
+    sample_order_rows,
+):
+    csv_path = write_orders_csv(tmp_path / "orders.csv", sample_order_rows)
+
+    count = validate_historical_order_csv(csv_path)
+
+    assert count == len(sample_order_rows)
 
 
 def test_historical_order_record_exposes_document_and_metadata(
@@ -218,8 +229,8 @@ def test_historical_order_record_exposes_document_and_metadata(
     sample_order_rows,
 ):
     csv_path = write_orders_csv(tmp_path / "orders.csv", sample_order_rows)
-    dataset = load_historical_order_dataset(csv_path)
-    record = dataset.records[0]
+    records = list(iter_historical_order_records(csv_path))
+    record = records[0]
 
     metadata = record.to_metadata()
 
@@ -233,9 +244,9 @@ def test_historical_order_record_exposes_document_and_metadata(
 
 def test_batched_splits_records(sample_order_rows, tmp_path):
     csv_path = write_orders_csv(tmp_path / "orders.csv", sample_order_rows)
-    dataset = load_historical_order_dataset(csv_path)
+    records = tuple(iter_historical_order_records(csv_path))
 
-    batches = batched(dataset.records, batch_size=2)
+    batches = list(batched(records, batch_size=2))
 
     assert len(batches) == 2
     assert len(batches[0]) == 2
@@ -244,10 +255,10 @@ def test_batched_splits_records(sample_order_rows, tmp_path):
 
 def test_batched_rejects_invalid_batch_size(sample_order_rows, tmp_path):
     csv_path = write_orders_csv(tmp_path / "orders.csv", sample_order_rows)
-    dataset = load_historical_order_dataset(csv_path)
+    records = tuple(iter_historical_order_records(csv_path))
 
     with pytest.raises(ValueError, match="batch_size must be"):
-        batched(dataset.records, batch_size=0)
+        list(batched(records, batch_size=0))
 
 
 def test_ingest_orders_to_chroma_returns_row_count(
@@ -363,6 +374,14 @@ def test_parse_query_features_extracts_structured_values():
     assert features.storage_tb == 20
 
 
+def test_parse_query_features_supports_multiplication_symbol_quantity():
+    features = parse_query_features(
+        "AWS 1000× 2U server with Xeon-8480 512GB memory 20TB storage"
+    )
+
+    assert features.quantity == 1000
+
+
 def test_parse_query_features_handles_missing_structured_values():
     features = parse_query_features("urgent AWS server quote")
 
@@ -370,6 +389,12 @@ def test_parse_query_features_handles_missing_structured_values():
     assert features.chassis is None
     assert features.memory_gb is None
     assert features.storage_tb is None
+
+
+def test_parse_query_features_does_not_treat_cpu_sku_suffix_as_quantity():
+    features = parse_query_features("Metadata cleanup for Xeon-8480x inventory")
+
+    assert features.quantity is None
 
 
 def test_compute_structured_similarity_rewards_matching_features():
@@ -426,6 +451,48 @@ def test_compute_structured_similarity_penalizes_weaker_spec_match():
     )
 
     assert strong_score > weak_score
+
+
+def test_structured_similarity_does_not_match_substrings():
+    metadata = {
+        "customer": "Meta",
+        "cpu_sku": "Xeon-8480",
+        "memory_gb": 512,
+        "storage_tb": 20,
+        "chassis": "2U",
+        "quantity": 1000,
+    }
+    query = "Metadata cleanup for Xeon-8480x inventory"
+    features = parse_query_features(query)
+
+    score = compute_structured_similarity(
+        query=query,
+        query_features=features,
+        metadata=metadata,
+    )
+
+    assert score == 0.0
+
+
+def test_structured_similarity_treats_matching_zero_values_as_exact_match():
+    metadata = {
+        "customer": "AWS",
+        "cpu_sku": "Xeon-8480",
+        "memory_gb": 512,
+        "storage_tb": 0,
+        "chassis": "2U",
+        "quantity": 1000,
+    }
+    query = "0TB storage"
+    features = parse_query_features(query)
+
+    score = compute_structured_similarity(
+        query=query,
+        query_features=features,
+        metadata=metadata,
+    )
+
+    assert score == 1.0
 
 
 def test_compute_final_score_combines_semantic_and_structured_scores():

@@ -128,27 +128,31 @@ def parse_query_features(query: str) -> QueryFeatures:
     """Extract structured order features from a free-form query."""
     normalized_query = query.lower()
 
-    quantity = _parse_quantity(normalized_query)
-    chassis = _parse_chassis(normalized_query)
-    memory_gb = _parse_capacity(normalized_query, unit="gb")
-    storage_tb = _parse_capacity(normalized_query, unit="tb")
-
     return QueryFeatures(
-        quantity=quantity,
-        chassis=chassis,
-        memory_gb=memory_gb,
-        storage_tb=storage_tb,
+        quantity=_parse_quantity(normalized_query),
+        chassis=_parse_chassis(normalized_query),
+        memory_gb=_parse_capacity(normalized_query, unit="gb"),
+        storage_tb=_parse_capacity(normalized_query, unit="tb"),
     )
 
 
 def _parse_quantity(normalized_query: str) -> int | None:
-    match = re.search(r"\b(\d+)\s*x\b", normalized_query)
+    """Parse order quantity such as '1000x' or '1000×'.
+
+    This intentionally avoids parsing CPU/SKU fragments such as 'Xeon-8480x'
+    as an order quantity.
+    """
+    match = re.search(
+        r"(?<![A-Za-z0-9-])(\d+)\s*[x×](?![A-Za-z0-9])",
+        normalized_query,
+    )
     if match:
         return int(match.group(1))
     return None
 
 
 def _parse_chassis(normalized_query: str) -> str | None:
+    """Parse chassis values such as 1U, 2U, or 4U."""
     match = re.search(r"\b([124])u\b", normalized_query)
     if match:
         return f"{match.group(1).upper()}U"
@@ -156,10 +160,25 @@ def _parse_chassis(normalized_query: str) -> str | None:
 
 
 def _parse_capacity(normalized_query: str, unit: str) -> int | None:
+    """Parse capacity values such as 512GB or 20TB."""
     match = re.search(rf"\b(\d+)\s*{unit}\b", normalized_query)
     if match:
         return int(match.group(1))
     return None
+
+
+def contains_exact_term(normalized_text: str, term: str) -> bool:
+    """Return whether a term appears as an exact token-like match.
+
+    This avoids false positives such as customer "Meta" matching "Metadata".
+    It also supports SKU values that contain symbols, such as "Xeon-8592+".
+    """
+    normalized_term = term.strip().lower()
+    if not normalized_term:
+        return False
+
+    pattern = rf"(?<![A-Za-z0-9]){re.escape(normalized_term)}(?![A-Za-z0-9])"
+    return re.search(pattern, normalized_text) is not None
 
 
 def compute_structured_similarity(
@@ -170,19 +189,18 @@ def compute_structured_similarity(
 ) -> float:
     """Compute structured similarity between query features and order metadata.
 
-    The score is normalized by the features that are available in the query.
-    Missing query features are ignored instead of being treated as mismatches.
+    The score is normalized by the features available in the query. Missing
+    query features are ignored instead of being treated as mismatches.
     """
     normalized_query = query.lower()
-
     weighted_scores: list[tuple[float, float]] = []
 
-    customer = str(metadata["customer"]).lower()
-    if customer in normalized_query:
+    customer = str(metadata["customer"])
+    if contains_exact_term(normalized_query, customer):
         weighted_scores.append((0.18, 1.0))
 
-    cpu_sku = str(metadata["cpu_sku"]).lower()
-    if cpu_sku in normalized_query:
+    cpu_sku = str(metadata["cpu_sku"])
+    if contains_exact_term(normalized_query, cpu_sku):
         weighted_scores.append((0.22, 1.0))
 
     if query_features.chassis is not None:
@@ -216,21 +234,29 @@ def compute_structured_similarity(
     if not weighted_scores:
         return 0.0
 
-    total_weight = sum(weight for weight, _ in weighted_scores)
+    total_weight = sum(weight for weight, _score in weighted_scores)
     weighted_sum = sum(weight * score for weight, score in weighted_scores)
 
     return round(weighted_sum / total_weight, 6)
 
 
 def _exact_match_score(query_value: str, candidate_value: str) -> float:
+    """Return 1.0 only for exact categorical matches."""
     return 1.0 if query_value.lower() == candidate_value.lower() else 0.0
 
 
 def _numeric_closeness_score(query_value: int, candidate_value: int) -> float:
+    """Return a bounded numeric closeness score.
+
+    Equal zero values are treated as a perfect match. Otherwise, the score is
+    the ratio between the smaller and larger value.
+    """
     larger = max(query_value, candidate_value)
     smaller = min(query_value, candidate_value)
+
     if larger == 0:
-        return 0.0
+        return 1.0
+
     return round(smaller / larger, 6)
 
 
@@ -241,7 +267,7 @@ def compute_final_score(
     semantic_weight: float,
     structured_weight: float,
 ) -> float:
-    """Combine semantic and structured similarity into the reranking score."""
+    """Combine semantic and structured similarity into a reranking score."""
     weight_sum = semantic_weight + structured_weight
     if weight_sum <= 0:
         raise ValueError("semantic_weight + structured_weight must be greater than 0")
