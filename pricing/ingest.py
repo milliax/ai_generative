@@ -1,477 +1,254 @@
-"""Ingest historical order records into ChromaDB for Pricing / RAG.
-
-This module loads normalized historical order records from CSV, validates the
-required schema, embeds the `spec_summary` field, and stores the records in a
-ChromaDB collection.
-
-The CSV path is intentionally configurable so this pipeline can ingest both:
-- generated local mock data, such as data/mock_orders.csv
-- teacher-provided historical order data after it has been normalized into the
-  expected schema
-
-Generated or teacher-provided CSV files must stay outside git.
-"""
-
 from __future__ import annotations
 
 import argparse
-import csv
 import os
-from collections.abc import Iterable, Iterator
-from dataclasses import dataclass
-from datetime import date
+from numbers import Integral, Real
 from pathlib import Path
-from typing import Protocol
+from typing import Any
+
+import chromadb
+import pandas as pd
+from sentence_transformers import SentenceTransformer
 
 
-DEFAULT_COLLECTION_NAME = "historical_orders"
-DEFAULT_CHROMA_PERSIST_DIR = Path("chroma_db")
-DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-DEFAULT_BATCH_SIZE = 128
+DEFAULT_CSV_PATH = Path("data/teacher_orders_for_rag.csv")
+DEFAULT_PERSIST_DIR = "./chroma_db"
 
-REQUIRED_ORDER_COLUMNS = (
-    "order_id",
-    "customer",
-    "cpu_sku",
-    "memory_gb",
-    "storage_tb",
-    "chassis",
-    "quantity",
-    "delivered_at",
-    "final_price",
-    "carbon_kg",
-    "spec_summary",
-)
+COLLECTION_NAME = "historical_orders"
+EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+
+ID_COLUMN = "order_id"
+DOCUMENT_COLUMN = "spec_summary"
+REQUIRED_COLUMNS = [ID_COLUMN, DOCUMENT_COLUMN]
+
 
 MetadataValue = str | int | float | bool
-OrderMetadata = dict[str, MetadataValue]
-EmbeddingVector = list[float]
 
 
-class HistoricalOrderDataError(ValueError):
-    """Raised when historical order data is invalid or incomplete."""
-
-
-class EmbeddingProvider(Protocol):
-    """Protocol for embedding documents and queries."""
-
-    def embed_documents(self, texts: list[str]) -> list[EmbeddingVector]:
-        """Return one embedding vector for each document text."""
-
-    def embed_query(self, text: str) -> EmbeddingVector:
-        """Return one embedding vector for a query text."""
-
-
-class SentenceTransformerEmbeddingProvider:
-    """Embedding provider backed by sentence-transformers.
-
-    The model is loaded lazily so importing this module remains lightweight.
-    """
-
-    def __init__(self, model_name: str = DEFAULT_EMBEDDING_MODEL) -> None:
-        self.model_name = model_name
-        self._model = None
-
-    def embed_documents(self, texts: list[str]) -> list[EmbeddingVector]:
-        """Embed document texts."""
-        return self._encode(texts)
-
-    def embed_query(self, text: str) -> EmbeddingVector:
-        """Embed one query text."""
-        return self._encode([text])[0]
-
-    def _encode(self, texts: list[str]) -> list[EmbeddingVector]:
-        if self._model is None:
-            from sentence_transformers import SentenceTransformer
-
-            self._model = SentenceTransformer(self.model_name)
-
-        embeddings = self._model.encode(
-            texts,
-            normalize_embeddings=True,
-            show_progress_bar=False,
-        )
-        return embeddings.tolist()
-
-
-@dataclass(frozen=True, slots=True)
-class HistoricalOrderRecord:
-    """One validated historical order record for Pricing / RAG."""
-
-    order_id: str
-    customer: str
-    cpu_sku: str
-    memory_gb: int
-    storage_tb: int
-    chassis: str
-    quantity: int
-    delivered_at: str
-    final_price: float
-    carbon_kg: float
-    spec_summary: str
-
-    @classmethod
-    def from_csv_row(
-        cls,
-        row: dict[str, str],
-        row_number: int,
-    ) -> HistoricalOrderRecord:
-        """Create a validated record from one CSV row.
-
-        Args:
-            row: Raw CSV row.
-            row_number: Human-readable CSV row number, including header row.
-
-        Raises:
-            HistoricalOrderDataError: If the row contains invalid values.
-        """
-        return cls(
-            order_id=_require_text(row, "order_id", row_number),
-            customer=_require_text(row, "customer", row_number),
-            cpu_sku=_require_text(row, "cpu_sku", row_number),
-            memory_gb=_parse_int(row, "memory_gb", row_number, minimum=1),
-            storage_tb=_parse_int(row, "storage_tb", row_number, minimum=0),
-            chassis=_require_text(row, "chassis", row_number),
-            quantity=_parse_int(row, "quantity", row_number, minimum=1),
-            delivered_at=_parse_date_text(row, "delivered_at", row_number),
-            final_price=_parse_float(row, "final_price", row_number, minimum=0.0),
-            carbon_kg=_parse_float(row, "carbon_kg", row_number, minimum=0.0),
-            spec_summary=_require_text(row, "spec_summary", row_number),
-        )
-
-    @property
-    def document(self) -> str:
-        """Return the text to embed and store as the ChromaDB document."""
-        return self.spec_summary
-
-    def to_metadata(self) -> OrderMetadata:
-        """Return ChromaDB-compatible metadata."""
-        return {
-            "order_id": self.order_id,
-            "customer": self.customer,
-            "cpu_sku": self.cpu_sku,
-            "memory_gb": self.memory_gb,
-            "storage_tb": self.storage_tb,
-            "chassis": self.chassis,
-            "quantity": self.quantity,
-            "delivered_at": self.delivered_at,
-            "final_price": self.final_price,
-            "carbon_kg": self.carbon_kg,
-        }
-
-
-def _require_text(
-    row: dict[str, str],
-    column: str,
-    row_number: int,
-) -> str:
-    value = row[column].strip()
-    if not value:
-        raise HistoricalOrderDataError(
-            f"Row {row_number}: column '{column}' must not be empty."
-        )
-    return value
-
-
-def _parse_int(
-    row: dict[str, str],
-    column: str,
-    row_number: int,
-    minimum: int,
-) -> int:
-    raw_value = row[column].strip()
-    try:
-        value = int(raw_value)
-    except ValueError as exc:
-        raise HistoricalOrderDataError(
-            f"Row {row_number}: column '{column}' must be an integer. "
-            f"Got: {raw_value!r}."
-        ) from exc
-
-    if value < minimum:
-        raise HistoricalOrderDataError(
-            f"Row {row_number}: column '{column}' must be >= {minimum}. "
-            f"Got: {value}."
-        )
-
-    return value
-
-
-def _parse_float(
-    row: dict[str, str],
-    column: str,
-    row_number: int,
-    minimum: float,
-) -> float:
-    raw_value = row[column].strip()
-    try:
-        value = float(raw_value)
-    except ValueError as exc:
-        raise HistoricalOrderDataError(
-            f"Row {row_number}: column '{column}' must be numeric. "
-            f"Got: {raw_value!r}."
-        ) from exc
-
-    if value <= minimum:
-        raise HistoricalOrderDataError(
-            f"Row {row_number}: column '{column}' must be > {minimum}. "
-            f"Got: {value}."
-        )
-
-    return value
-
-
-def _parse_date_text(
-    row: dict[str, str],
-    column: str,
-    row_number: int,
-) -> str:
-    value = _require_text(row, column, row_number)
-    try:
-        date.fromisoformat(value)
-    except ValueError as exc:
-        raise HistoricalOrderDataError(
-            f"Row {row_number}: column '{column}' must use YYYY-MM-DD format. "
-            f"Got: {value!r}."
-        ) from exc
-
-    return value
-
-
-def resolve_persist_dir(persist_dir: str | Path | None = None) -> Path:
-    """Resolve the ChromaDB persist directory.
+def get_persist_dir(persist_dir: str | Path | None = None) -> str:
+    """Return the ChromaDB persistence directory.
 
     Priority:
-        1. Function argument
-        2. CHROMA_PERSIST_DIR environment variable
-        3. Default local chroma_db directory
+    1. Explicit function argument
+    2. CHROMA_PERSIST_DIR environment variable
+    3. Local default ./chroma_db
     """
     if persist_dir is not None:
-        return Path(persist_dir)
+        return str(persist_dir)
 
-    env_value = os.getenv("CHROMA_PERSIST_DIR")
-    if env_value:
-        return Path(env_value)
-
-    return DEFAULT_CHROMA_PERSIST_DIR
+    return os.getenv("CHROMA_PERSIST_DIR", DEFAULT_PERSIST_DIR)
 
 
-def iter_historical_order_records(csv_path: str | Path) -> Iterator[HistoricalOrderRecord]:
-    """Stream and validate historical order records from a CSV file.
+def validate_csv_file_exists(csv_path: Path) -> None:
+    """Raise a clear error if the input CSV file does not exist."""
+    if not csv_path.exists():
+        raise FileNotFoundError(f"Input CSV file not found: {csv_path}")
 
-    This function validates rows while iterating and stores only seen order IDs
-    for duplicate detection. It does not keep the entire dataset in memory.
 
-    Args:
-        csv_path: Path to a normalized historical order CSV file.
+def validate_required_columns(dataframe: pd.DataFrame, required_columns: list[str]) -> None:
+    """Validate that the CSV contains the minimum columns required for RAG."""
+    missing_columns = [column for column in required_columns if column not in dataframe.columns]
 
-    Yields:
-        Validated historical order records.
+    if missing_columns:
+        raise ValueError(f"Input CSV is missing required columns: {missing_columns}")
 
-    Raises:
-        FileNotFoundError: If the CSV file does not exist.
-        HistoricalOrderDataError: If required columns are missing, values are
-            invalid, the file is empty, or duplicate order IDs exist.
+
+def validate_non_empty_dataframe(dataframe: pd.DataFrame) -> None:
+    """Validate that the CSV contains at least one row."""
+    if dataframe.empty:
+        raise ValueError("Input CSV does not contain any rows.")
+
+
+def validate_unique_ids(dataframe: pd.DataFrame, id_column: str = ID_COLUMN) -> None:
+    """Validate that document IDs are present and unique."""
+    if dataframe[id_column].isna().any():
+        raise ValueError(f"Column '{id_column}' contains missing values.")
+
+    duplicated_count = dataframe[id_column].astype(str).duplicated().sum()
+    if duplicated_count > 0:
+        raise ValueError(f"Column '{id_column}' contains {duplicated_count} duplicated values.")
+
+
+def normalize_document_text(value: Any) -> str:
+    """Normalize the document text used for embeddings."""
+    if pd.isna(value):
+        return ""
+
+    return str(value).strip()
+
+
+def validate_documents(documents: list[str]) -> None:
+    """Validate that all embedding documents are non-empty."""
+    empty_count = sum(1 for document in documents if not document)
+
+    if empty_count > 0:
+        raise ValueError(f"Column '{DOCUMENT_COLUMN}' contains {empty_count} empty documents.")
+
+
+def sanitize_metadata_value(value: Any) -> MetadataValue:
+    """Convert a pandas value into a ChromaDB-compatible metadata value.
+
+    ChromaDB metadata values must be str, int, float, or bool.
+    Missing values are converted to an empty string to avoid NaN serialization issues.
     """
-    path = Path(csv_path)
-    if not path.exists():
-        raise FileNotFoundError(f"Historical order CSV not found: {path}")
+    if pd.isna(value):
+        return ""
 
-    with path.open("r", encoding="utf-8", newline="") as csv_file:
-        reader = csv.DictReader(csv_file)
-        fieldnames = reader.fieldnames or []
+    if isinstance(value, bool):
+        return value
 
-        missing_columns = sorted(set(REQUIRED_ORDER_COLUMNS) - set(fieldnames))
-        if missing_columns:
-            raise HistoricalOrderDataError(
-                "Historical order CSV is missing required columns: "
-                + ", ".join(missing_columns)
-            )
+    if isinstance(value, Integral):
+        return int(value)
 
-        seen_order_ids: set[str] = set()
-        row_count = 0
+    if isinstance(value, Real):
+        return float(value)
 
-        for row_number, row in enumerate(reader, start=2):
-            row_count += 1
-            record = HistoricalOrderRecord.from_csv_row(row, row_number)
+    if isinstance(value, pd.Timestamp):
+        return value.date().isoformat()
 
-            if record.order_id in seen_order_ids:
-                raise HistoricalOrderDataError(
-                    f"Duplicate order_id values found: {record.order_id}"
-                )
-
-            seen_order_ids.add(record.order_id)
-            yield record
-
-        if row_count == 0:
-            raise HistoricalOrderDataError(
-                f"Historical order CSV contains no rows: {path}"
-            )
+    return str(value).strip()
 
 
-def validate_historical_order_csv(csv_path: str | Path) -> int:
-    """Validate a historical order CSV without storing all records in memory.
+def build_metadata_records(dataframe: pd.DataFrame) -> list[dict[str, MetadataValue]]:
+    """Build metadata dictionaries for ChromaDB from all non-document columns."""
+    metadata_columns = [column for column in dataframe.columns if column != DOCUMENT_COLUMN]
 
-    Args:
-        csv_path: Path to a normalized historical order CSV file.
+    return [
+        {column: sanitize_metadata_value(row[column]) for column in metadata_columns}
+        for _, row in dataframe.iterrows()
+    ]
 
-    Returns:
-        Number of valid historical order records.
+
+def load_orders_csv(csv_path: Path) -> pd.DataFrame:
+    """Load and validate the RAG-ready teacher order CSV."""
+    validate_csv_file_exists(csv_path)
+
+    dataframe = pd.read_csv(csv_path, encoding="utf-8-sig")
+    validate_non_empty_dataframe(dataframe)
+    validate_required_columns(dataframe, REQUIRED_COLUMNS)
+    validate_unique_ids(dataframe)
+
+    return dataframe
+
+
+def collection_exists(
+    client: chromadb.PersistentClient,
+    collection_name: str,
+) -> bool:
+    """Return whether a ChromaDB collection exists.
+
+    ChromaDB versions differ in whether list_collections returns objects or names,
+    so this helper supports both forms.
     """
-    count = 0
-    for _record in iter_historical_order_records(csv_path):
-        count += 1
-    return count
+    existing_collections = client.list_collections()
+
+    return any(
+        getattr(collection, "name", collection) == collection_name
+        for collection in existing_collections
+    )
 
 
-def get_chroma_client(persist_dir: str | Path | None = None):
-    """Create a persistent ChromaDB client."""
-    import chromadb
-
-    resolved_dir = resolve_persist_dir(persist_dir)
-    resolved_dir.mkdir(parents=True, exist_ok=True)
-    return chromadb.PersistentClient(path=str(resolved_dir))
-
-
-def collection_exists(client, collection_name: str) -> bool:
-    """Return whether a ChromaDB collection exists."""
-    collection_names = {
-        collection.name if hasattr(collection, "name") else str(collection)
-        for collection in client.list_collections()
-    }
-    return collection_name in collection_names
-
-
-def reset_collection_if_exists(client, collection_name: str) -> None:
-    """Delete an existing collection before re-ingesting local data."""
+def reset_collection(
+    client: chromadb.PersistentClient,
+    collection_name: str,
+):
+    """Delete and recreate a ChromaDB collection to avoid duplicate IDs."""
     if collection_exists(client, collection_name):
-        client.delete_collection(name=collection_name)
+        client.delete_collection(collection_name)
+
+    return client.create_collection(name=collection_name)
 
 
-def batched(
-    records: Iterable[HistoricalOrderRecord],
-    batch_size: int,
-) -> Iterator[tuple[HistoricalOrderRecord, ...]]:
-    """Yield records in fixed-size batches.
+def embed_documents(
+    documents: list[str],
+    model_name: str = EMBEDDING_MODEL_NAME,
+) -> list[list[float]]:
+    """Create normalized embeddings for document texts."""
+    model = SentenceTransformer(model_name)
+    embeddings = model.encode(
+        documents,
+        batch_size=64,
+        show_progress_bar=True,
+        normalize_embeddings=True,
+    )
 
-    Args:
-        records: Historical order records.
-        batch_size: Number of records per batch.
-
-    Raises:
-        ValueError: If batch_size is less than 1.
-    """
-    if batch_size < 1:
-        raise ValueError("batch_size must be greater than or equal to 1")
-
-    batch: list[HistoricalOrderRecord] = []
-
-    for record in records:
-        batch.append(record)
-        if len(batch) == batch_size:
-            yield tuple(batch)
-            batch.clear()
-
-    if batch:
-        yield tuple(batch)
+    return embeddings.tolist()
 
 
 def ingest_orders_to_chroma(
-    csv_path: str | Path,
+    csv_path: str | Path = DEFAULT_CSV_PATH,
     persist_dir: str | Path | None = None,
-    collection_name: str = DEFAULT_COLLECTION_NAME,
-    embedding_provider: EmbeddingProvider | None = None,
-    reset_collection: bool = True,
-    batch_size: int = DEFAULT_BATCH_SIZE,
+    collection_name: str = COLLECTION_NAME,
 ) -> int:
-    """Ingest historical order records into a ChromaDB collection.
+    """Ingest RAG-ready teacher order records into ChromaDB.
+
+    The `spec_summary` column is embedded as the retrieval document.
+    All other columns are stored as metadata.
 
     Args:
-        csv_path: Path to a normalized historical order CSV file.
-        persist_dir: ChromaDB persistence directory.
-        collection_name: Target ChromaDB collection name.
-        embedding_provider: Optional embedding provider. Defaults to
-            sentence-transformers for production use.
-        reset_collection: If true, delete the existing collection before ingest.
-        batch_size: Number of records to write per ChromaDB batch.
+        csv_path: Path to the RAG-ready CSV generated by convert_teacher_excel.py.
+        persist_dir: Optional ChromaDB persistence directory.
+        collection_name: ChromaDB collection name.
 
     Returns:
-        Number of ingested historical order records.
+        Number of ingested records.
     """
-    record_count = validate_historical_order_csv(csv_path)
-    provider = embedding_provider or SentenceTransformerEmbeddingProvider()
-    client = get_chroma_client(persist_dir)
+    csv_file_path = Path(csv_path)
+    dataframe = load_orders_csv(csv_file_path)
 
-    if reset_collection:
-        reset_collection_if_exists(client, collection_name)
+    ids = dataframe[ID_COLUMN].astype(str).tolist()
+    documents = dataframe[DOCUMENT_COLUMN].apply(normalize_document_text).tolist()
+    validate_documents(documents)
 
-    collection = client.get_or_create_collection(
-        name=collection_name,
-        metadata={"hnsw:space": "cosine"},
+    metadatas = build_metadata_records(dataframe)
+    embeddings = embed_documents(documents)
+
+    client = chromadb.PersistentClient(path=get_persist_dir(persist_dir))
+    collection = reset_collection(client, collection_name)
+
+    collection.add(
+        ids=ids,
+        documents=documents,
+        embeddings=embeddings,
+        metadatas=metadatas,
     )
 
-    for record_batch in batched(
-        iter_historical_order_records(csv_path),
-        batch_size=batch_size,
-    ):
-        documents = [record.document for record in record_batch]
-        embeddings = provider.embed_documents(documents)
-        ids = [record.order_id for record in record_batch]
-        metadatas = [record.to_metadata() for record in record_batch]
-
-        collection.add(
-            ids=ids,
-            documents=documents,
-            embeddings=embeddings,
-            metadatas=metadatas,
-        )
-
-    return record_count
+    return len(ids)
 
 
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(
-        description="Ingest historical order CSV data into ChromaDB."
-    )
+    parser = argparse.ArgumentParser(description="Ingest teacher cable order CSV into ChromaDB.")
     parser.add_argument(
-        "csv_path",
+        "--csv",
         type=Path,
-        help="Path to normalized historical order CSV data.",
+        default=DEFAULT_CSV_PATH,
+        help=f"Input CSV path. Default: {DEFAULT_CSV_PATH}",
     )
     parser.add_argument(
         "--persist-dir",
         type=Path,
         default=None,
-        help="ChromaDB persist directory. Default: CHROMA_PERSIST_DIR or chroma_db.",
+        help="ChromaDB persist directory. Default: CHROMA_PERSIST_DIR or ./chroma_db",
     )
     parser.add_argument(
-        "--collection",
-        default=DEFAULT_COLLECTION_NAME,
-        help=f"ChromaDB collection name. Default: {DEFAULT_COLLECTION_NAME}",
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=DEFAULT_BATCH_SIZE,
-        help=f"Number of records per ChromaDB batch. Default: {DEFAULT_BATCH_SIZE}",
+        "--collection-name",
+        default=COLLECTION_NAME,
+        help=f"ChromaDB collection name. Default: {COLLECTION_NAME}",
     )
     return parser.parse_args()
 
 
 def main() -> None:
-    """Run the ingestion workflow from the command line."""
+    """Run CSV ingestion from the command line."""
     args = parse_args()
     ingested_count = ingest_orders_to_chroma(
-        csv_path=args.csv_path,
+        csv_path=args.csv,
         persist_dir=args.persist_dir,
-        collection_name=args.collection,
-        batch_size=args.batch_size,
+        collection_name=args.collection_name,
     )
-    print(
-        f"Ingested {ingested_count} historical orders "
-        f"into collection '{args.collection}'."
-    )
+
+    print(f"Ingested {ingested_count} records into collection '{args.collection_name}'.")
 
 
 if __name__ == "__main__":
