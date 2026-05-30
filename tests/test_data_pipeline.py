@@ -78,3 +78,15 @@ def test_run_full_pipeline_stops_on_failure(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="convert failed"):
         data_pipeline.run_full_pipeline(excel_path=tmp_path / "in.xlsx", progress_callback=lambda *a: None)
     assert "chroma" not in calls
+
+
+def test_data_status_csv_with_bom_counts_correctly(tmp_path):
+    csv = tmp_path / "bom.csv"
+    csv.write_text("﻿order_id,spec_summary\nO1,hello\nO2,world\n", encoding="utf-8")
+    status = data_pipeline.data_status(
+        raw_dir=tmp_path,
+        db_path=tmp_path / "x.db",
+        csv_path=csv,
+        persist_dir=tmp_path / "chroma",
+    )
+    assert status.csv_rows == 2

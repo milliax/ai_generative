@@ -58,7 +58,7 @@ def _db_table_count(db_path: Path) -> int:
 def _csv_row_count(csv_path: Path) -> int:
     if not csv_path.exists():
         return 0
-    with csv_path.open(encoding="utf-8") as handle:
+    with csv_path.open(encoding="utf-8-sig") as handle:
         return max(sum(1 for _ in handle) - 1, 0)  # minus header
 
 
