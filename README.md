@@ -99,12 +99,18 @@
 │   ├── capacity.py
 │   ├── pricing.py
 │   └── esg.py
+├── scripts/
+│   ├── convert_teacher_excel.py    # 老師 xlsx → RAG CSV
+│   └── build_db.py                 # 老師 xlsx → SQLite（9 表）
 ├── pricing/
 │   ├── ingest.py                   # 歷史訂單 → embeddings → ChromaDB
 │   └── retrieval.py
+├── shared/
+│   └── data_pipeline.py            # 啟動偵測 + 轉檔串接（UI 唯一介面）
 ├── ui/
-│   └── streamlit_app.py
-├── data/                           # gitignore；老師資料 + mock data
+│   └── streamlit_app.py            # 啟動 gate + 轉檔 + 協調 panel
+├── raw_data/                       # gitignore；放老師原始 xlsx
+├── data/                           # gitignore；轉檔產物（SQLite / CSV）
 └── tests/
 ```
 
