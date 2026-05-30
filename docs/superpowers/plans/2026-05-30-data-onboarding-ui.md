@@ -548,17 +548,16 @@ git commit -m "feat(data): add data_pipeline with status detection and 3-step co
 # tests/test_orchestrator_stub.py
 from datetime import datetime
 
-from shared.models import CoordinationPlan, OrderRequest, Urgency
+from shared.models import CoordinationPlan, OrderRequest
 from agents import orchestrator
 
 
 def _order() -> OrderRequest:
     return OrderRequest(
-        order_id="ORD-TEST-1",
         customer="測試客戶",
         raw_text="需要 100 噸 CV 250mm2 電纜，兩週內交貨",
         received_at=datetime(2026, 5, 30, 10, 0, 0),
-        urgency=Urgency.rush,
+        urgency="rush",
     )
 
 
@@ -570,7 +569,6 @@ def test_run_orchestrator_returns_valid_plan(monkeypatch):
     )
     plan = orchestrator.run_orchestrator(_order())
     assert isinstance(plan, CoordinationPlan)
-    assert plan.order_id == "ORD-TEST-1"
     assert plan.reference_orders == [{"order_id": "O1", "similarity": 0.9, "matched_summary": "x"}]
 
 
@@ -605,14 +603,14 @@ from __future__ import annotations
 from datetime import date
 
 from pricing.retrieval import retrieve_similar
-from shared.models import CapacityStatus, CoordinationPlan, OrderRequest
+from shared.models import CoordinationPlan, OrderRequest
 
 
 def _build_query(order: OrderRequest) -> str:
     """Build a retrieval query from the order text (approximates spec_summary)."""
     parts = [order.customer, order.raw_text]
     if order.urgency is not None:
-        parts.append(order.urgency.value)
+        parts.append(order.urgency)  # Urgency is a Literal[str]
     return " ".join(p for p in parts if p)
 
 
@@ -626,12 +624,11 @@ def run_orchestrator(order: OrderRequest) -> CoordinationPlan:
         risks.append(f"RAG 檢索暫時無法使用（{type(exc).__name__}），參考歷史訂單從缺")
 
     return CoordinationPlan(
-        order_id=order.order_id,
         estimated_price=0.0,  # W1 stub
         price_confidence=(0.0, 0.0),  # W1 stub
         estimated_delivery=date(2026, 8, 15),  # W1 stub
         carbon_footprint_kg=0.0,  # W1 stub
-        capacity_status=CapacityStatus.available,  # W1 stub
+        capacity_status="OK",  # W1 stub (CapacityStatus = Literal["OK","OVERLOAD"])
         alternative_suppliers=[],  # W1 stub
         reference_orders=reference_orders,
         risks=risks,
@@ -678,7 +675,9 @@ import streamlit as st
 
 from agents.orchestrator import run_orchestrator
 from shared.data_pipeline import DEFAULT_RAW_DIR, data_status, run_full_pipeline
-from shared.models import OrderRequest, Urgency
+from shared.models import OrderRequest
+
+URGENCY_OPTIONS = ["normal", "rush", "emergency"]  # Urgency = Literal[...] in shared/models
 
 DEMO_SCENARIOS = {
     "（自訂）": "",
@@ -750,14 +749,13 @@ def render_main_panel() -> None:
         scenario = st.selectbox("Demo 情境", list(DEMO_SCENARIOS.keys()))
         customer = st.text_input("客戶", value="AWS")
         raw_text = st.text_area("需求", value=DEMO_SCENARIOS[scenario], height=120)
-        urgency = st.selectbox("急迫度", [u.value for u in Urgency])
+        urgency = st.selectbox("急迫度", URGENCY_OPTIONS)
         if st.button("▶ 跑 Agent"):
             order = OrderRequest(
-                order_id=f"ORD-{datetime.now():%H%M%S}",
                 customer=customer,
                 raw_text=raw_text,
                 received_at=datetime.now(),
-                urgency=Urgency(urgency),
+                urgency=urgency,
             )
             with st.status("🤖 Agents 協調中…", expanded=False):
                 st.session_state["plan"] = run_orchestrator(order)
