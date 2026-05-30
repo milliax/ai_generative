@@ -36,11 +36,12 @@ def render_gate(status) -> None:
     if status.raw_excel_path is None:
         st.warning("🗂️ 尚未載入資料")
         st.write(f"請將老師的 Excel 放到 `{DEFAULT_RAW_DIR}/` 後按下方按鈕。")
-        st.button("🔄 重新偵測", on_click=st.rerun)
+        if st.button("🔄 重新偵測"):
+            st.rerun()
         return
 
     st.success(f"✅ 偵測到：{status.raw_excel_path.name}")
-    st.caption("9 個工作表 · 約 3000 筆訂單")
+    st.caption("（預期 9 個工作表 · 約 3000 筆訂單）")
     if st.button("⚙️ 開始轉檔"):
         _run_conversion(status.raw_excel_path)
 
@@ -60,10 +61,12 @@ def _run_conversion(excel_path) -> None:
         except Exception as exc:  # noqa: BLE001 — show the failing step to the user
             box.update(label="❌ 轉檔失敗", state="error")
             st.error(f"轉檔失敗：{type(exc).__name__}: {exc}")
-            st.button("🔁 重試", on_click=st.rerun)
+            if st.button("🔁 重試"):
+                st.rerun()
             return
     st.balloons()
-    st.button("✅ 進入系統", on_click=st.rerun)
+    if st.button("✅ 進入系統"):
+        st.rerun()
 
 
 def render_sidebar(status) -> None:
