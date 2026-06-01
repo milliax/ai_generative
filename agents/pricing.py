@@ -51,10 +51,7 @@ def _build_fallback_payload(
         "estimated_price": estimated_price,
         "price_confidence": [low, high],
         "estimated_delivery": estimated_delivery,
-        "reference_orders": [
-            {"order_id": r.get("order_id", ""), "similarity": r.get("similarity", 0)}
-            for r in rag_records[:3]
-        ],
+        "reference_orders": [dict(record) for record in rag_records[:3]],
         "pricing_mode": "fallback",
     }
     if warning:

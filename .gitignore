@@ -18,10 +18,12 @@ env/
 .ruff_cache/
 
 # Data (老師資料 + mock data 都不進 repo)
+raw_data/
 data/
 *.csv
 *.xlsx
 *.parquet
+*.db
 
 # ChromaDB
 chroma_db/
