@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from shared.models import AgentMessage
@@ -26,24 +27,65 @@ def _format_rag_results(records: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _build_fallback_payload(
+    spec: dict[str, Any],
+    rag_records: list[dict[str, Any]],
+    warning: str | None = None,
+) -> dict[str, Any]:
+    quantity_ton = float(spec.get("quantity_ton", 1.0))
+    estimated_price = round(quantity_ton * 85000, 2)
+    low = round(estimated_price * 0.95, 2)
+    high = round(estimated_price * 1.05, 2)
+
+    requested_delivery = spec.get("requested_delivery")
+    if isinstance(requested_delivery, datetime):
+        estimated_delivery = requested_delivery.date().isoformat()
+    elif isinstance(requested_delivery, date):
+        estimated_delivery = requested_delivery.isoformat()
+    elif isinstance(requested_delivery, str) and requested_delivery:
+        estimated_delivery = requested_delivery
+    else:
+        estimated_delivery = (date.today() + timedelta(days=30)).isoformat()
+
+    result: dict[str, Any] = {
+        "estimated_price": estimated_price,
+        "price_confidence": [low, high],
+        "estimated_delivery": estimated_delivery,
+        "reference_orders": [
+            {"order_id": r.get("order_id", ""), "similarity": r.get("similarity", 0)}
+            for r in rag_records[:3]
+        ],
+        "pricing_mode": "fallback",
+    }
+    if warning:
+        result["warning"] = warning
+
+    return result
+
+
 class PricingAgent(BaseAgent):
     name = "pricing"
     system_prompt = SYSTEM_PROMPT
 
     def run(self, payload: dict[str, Any]) -> AgentMessage:
         spec = payload.get("spec", {})
-        rag_records = payload.get("rag_records", [])  # 由 orchestrator 傳入
+        rag_records = payload.get("rag_records", [])
 
         if not rag_records:
-            # fallback：RAG 沒有結果就用 stub 公式
-            memory_gb = int(spec.get("memory_gb", 64))
-            quantity = int(spec.get("quantity", 1))
-            estimated_price = float(memory_gb * quantity * 100)
-            reasoning = "[FALLBACK] RAG 無結果，使用 stub 公式估價。"
-            reference_orders = []
-        else:
-            # 有 RAG 結果：呼叫 LLM 推理
-            user_prompt = f"""
+            result_payload = _build_fallback_payload(
+                spec,
+                rag_records=[],
+                warning="RAG retrieval returned no records.",
+            )
+            reasoning = "[FALLBACK] RAG 無結果，使用電纜噸數 stub 公式估價。"
+            return AgentMessage(
+                from_agent=self.name,
+                to_agent=None,
+                payload=result_payload,
+                reasoning=reasoning,
+            )
+
+        user_prompt = f"""
 【新訂單規格】: {spec}
 
 【歷史相似案例】:
@@ -56,20 +98,23 @@ class PricingAgent(BaseAgent):
 4. 條列式估價依據
 5. 參考訂單編號（最多3筆）
 """
+        result_payload = _build_fallback_payload(spec, rag_records)
+
+        try:
             llm_response = self.call_llm_text(user_prompt)
-            estimated_price = 0.0  # LLM 自由文字，price 從 reasoning 讀
+            result_payload["pricing_mode"] = "rag_llm"
+            result_payload["llm_analysis"] = llm_response
             reasoning = llm_response
-            reference_orders = [
-                {"order_id": r.get("order_id", ""), "similarity": r.get("similarity", 0)}
-                for r in rag_records[:3]
-            ]
+        except Exception as exc:  # noqa: BLE001
+            result_payload["warning"] = (
+                "LLM pricing analysis failed; returned RAG references with fallback formula. "
+                f"Reason: {exc}"
+            )
+            reasoning = result_payload["warning"]
 
         return AgentMessage(
             from_agent=self.name,
             to_agent=None,
-            payload={
-                "estimated_price": estimated_price,
-                "reference_orders": reference_orders,
-            },
+            payload=result_payload,
             reasoning=reasoning,
         )
