@@ -6,7 +6,13 @@ UI rules: no litellm import, no business logic, no hardcoded .env, no schema cha
 
 from __future__ import annotations
 
+import sys
 from datetime import datetime
+from pathlib import Path
+
+# `streamlit run ui/streamlit_app.py` puts ui/ on sys.path, not the project root,
+# so make the project root importable for the agents/ and shared/ packages.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import streamlit as st
 
