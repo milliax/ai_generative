@@ -72,7 +72,7 @@ class PricingAgent(BaseAgent):
             result_payload = _build_fallback_payload(
                 spec,
                 rag_records=[],
-                warning="RAG retrieval returned no records.",
+                warning="RAG 沒有找到相似的歷史訂單，改用噸數公式估價，建議人工複核。",
             )
             reasoning = "[FALLBACK] RAG 無結果，使用電纜噸數 stub 公式估價。"
             return AgentMessage(
@@ -104,8 +104,8 @@ class PricingAgent(BaseAgent):
             reasoning = llm_response
         except Exception as exc:  # noqa: BLE001
             result_payload["warning"] = (
-                "LLM pricing analysis failed; returned RAG references with fallback formula. "
-                f"Reason: {exc}"
+                "LLM 估價分析失敗，改用噸數公式並附上 RAG 參考案例。"
+                f"原因：{exc}"
             )
             reasoning = result_payload["warning"]
 

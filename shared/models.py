@@ -52,6 +52,7 @@ class CoordinationPlan(BaseModel):
     reference_orders: list[dict[str, Any]]
     risks: list[str]
     next_actions: list[str]
+    llm_analysis: str | None = Field(default=None, description="LLM 的條列式中文估價分析（若有）")
 
     @model_validator(mode="after")
     def _check_price_confidence_order(self) -> "CoordinationPlan":

@@ -7,7 +7,7 @@ from agents.capacity import CapacityAgent
 from agents.esg import ESGAgent
 from agents.order_intake import OrderIntakeAgent
 from agents.pricing import PricingAgent
-from shared.models import AgentMessage, CoordinationPlan, OrderRequest
+from shared.models import AgentMessage, CoordinationPlan, OrderRequest, OrderSpec
 
 
 def retrieve_similar(query: str, k: int = 3, **kwargs: Any) -> list[dict[str, Any]]:
@@ -29,6 +29,18 @@ def _build_query(order: OrderRequest) -> str:
     if order.urgency is not None:
         parts.append(order.urgency)
     return " ".join(p for p in parts if p)
+
+
+def _build_query_from_spec(spec: dict[str, Any]) -> str:
+    """Build a retrieval query from a structured spec, matching spec_summary fields."""
+    parts = [
+        spec.get("product_family"),
+        spec.get("product_description"),
+        spec.get("core_count"),
+        str(spec.get("section_area_mm2", "")),
+        spec.get("customer_name"),
+    ]
+    return " ".join(str(p) for p in parts if p)
 
 
 class OrchestratorState(TypedDict):
@@ -54,7 +66,7 @@ def _aggregate(state: OrchestratorState, reference_orders: list[dict[str, Any]])
 
     risks: list[str] = []
     if capacity_payload.get("capacity_status") == "OVERLOAD":
-        risks.append("Capacity is overloaded - investigate additional production partners.")
+        risks.append("產能已過載，建議評估外援產線或調整交期。")
 
     warning = pricing_payload.get("warning")
     if warning:
@@ -69,15 +81,27 @@ def _aggregate(state: OrchestratorState, reference_orders: list[dict[str, Any]])
         reference_orders=reference_orders,
         risks=risks,
         next_actions=[
-            "Verify copper material availability with procurement.",
-            "Assess production scheduling feasibility with manufacturing planning.",
-            "Prepare a customer response covering quotation and lead time.",
+            "向採購確認銅料供應狀況。",
+            "與生產排程確認產線可行性。",
+            "準備給客戶的回覆，涵蓋報價與交期。",
         ],
+        llm_analysis=pricing_payload.get("llm_analysis"),
     )
 
 
-def run_orchestrator(request: OrderRequest) -> CoordinationPlan:
-    """Run the real W1 agent pipeline from intake through aggregation."""
+def run_orchestrator(
+    request: OrderRequest | None = None,
+    *,
+    spec: OrderSpec | None = None,
+) -> CoordinationPlan:
+    """Run the agent pipeline from intake through aggregation.
+
+    Pass `spec` to feed a fully-structured order (e.g. from the UI form) and skip
+    the W1 intake stub. Pass `request` to parse free text via OrderIntakeAgent.
+    """
+    if spec is None and request is None:
+        raise ValueError("run_orchestrator needs either request or spec.")
+
     state: OrchestratorState = {
         "request": request,
         "spec": {},
@@ -87,9 +111,14 @@ def run_orchestrator(request: OrderRequest) -> CoordinationPlan:
         "trace": [],
     }
 
-    intake_msg = OrderIntakeAgent().run({"request": request.model_dump()})
-    state["spec"] = intake_msg.payload
-    state["trace"].append(intake_msg)
+    if spec is not None:
+        state["spec"] = spec.model_dump()
+        query = _build_query_from_spec(state["spec"])
+    else:
+        intake_msg = OrderIntakeAgent().run({"request": request.model_dump()})
+        state["spec"] = intake_msg.payload
+        state["trace"].append(intake_msg)
+        query = _build_query(request)
 
     capacity_msg = CapacityAgent().run({"spec": state["spec"]})
     state["capacity_result"] = capacity_msg.model_dump()
@@ -97,7 +126,7 @@ def run_orchestrator(request: OrderRequest) -> CoordinationPlan:
 
     rag_records: list[dict[str, Any]] = []
     try:
-        rag_records = retrieve_similar(_build_query(request), k=3)
+        rag_records = retrieve_similar(query, k=3)
     except Exception as exc:  # noqa: BLE001
         state["trace"].append(
             AgentMessage(

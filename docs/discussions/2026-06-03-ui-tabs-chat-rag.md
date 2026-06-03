@@ -32,6 +32,26 @@
 
 ## 未解 / 待辦
 
-- 多輪對話（追問「數量改 80 噸呢？」）尚未做，等 W2 agent 接真實 LLM 後再評估。
-- Order Intake / Capacity / ESG 仍是 W1 stub；聊天結果的解析品質受此限制。
+- Order Intake / Capacity / ESG 仍是 W1 stub。
 - 互動流程（點卡片開 modal）只做了 app 啟動驗證，完整點擊驗收待隊友在瀏覽器手動確認。
+
+## 追加（同日，實際試用後的修正）
+
+Max 在瀏覽器實際操作後回報三個問題並做了流程調整：
+
+- **中文問、英文答**：orchestrator 的 `next_actions` 與 overload 風險訊息、pricing 的 warning 都是寫死英文 → 已全部中文化。
+- **怎麼問單價都一樣 / 信任度低 / 給不出參數**：
+  - 顯示用的單價是 `數量(噸) × 85000` 公式，而 W1 intake stub 看不懂「2KM / 22mm」這種長度單位，數量一律 fallback 成 10 噸 → 所以單價不變。
+  - LLM 其實有產出真正的中文估價分析，但 `_aggregate` 沒把 `llm_analysis` 放進 `CoordinationPlan`，被丟掉了。
+- **切頁面回答消失**：使用者訊息在 LLM 呼叫前就先寫入，切頁面中斷該 run → 留下沒答案的孤兒。
+
+**因此把協調頁從「自由聊天」改成「結構化表單 + 必填門禁」**（Max 拍板）：
+
+- 規格表單（產品族 / 芯數 / 截面積下拉值**直接取自歷史 CSV 的真實值**，例如產品族 CV/CVV/FR-CV/HR/IV/VV/OTHER、芯數 單芯/多芯）；必填欄位填齊才能按「估價」，避免不完整資料餵給 AI。
+- `run_orchestrator` 新增 `spec: OrderSpec` 參數，表單直接建好 `OrderSpec` 餵進去、**跳過 W1 intake stub**；舊的 `request` 路徑與 smoke test 維持不變（向後相容）。
+- `CoordinationPlan` 新增 optional 欄位 `llm_analysis`，UI 在「🧠 AI 估價分析」顯示 LLM 真實中文分析。
+
+**仍待處理：**
+
+- 上方「預估單價」metric 仍是公式粗估；要把 LLM 文字裡的建議單價抽回數值欄位是另一段 parsing，未做。
+- RAG 相似度偏低（top similarity 接近 0）——檢索品質調校，屬估價 / RAG 組。

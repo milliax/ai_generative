@@ -2,7 +2,7 @@
 
 - **日期：** 2026-06-03
 - **作者：** Max + Claude
-- **狀態：** 待 review
+- **狀態：** 部分修訂（協調頁已於同日改為「結構化表單 + 必填門禁」，歷史訂單頁改為「表格 + filter」；詳見 [`docs/discussions/2026-06-03-ui-tabs-chat-rag.md`](../../discussions/2026-06-03-ui-tabs-chat-rag.md) 的「追加」段）
 - **相關：**
   - [`docs/superpowers/specs/2026-05-30-data-onboarding-ui-design.md`](2026-05-30-data-onboarding-ui-design.md)（前一版 UI：資料閘門 + 單一協調 panel）
   - [`docs/discussions/2026-06-01-agent-orchestrator-rag-integration.md`](../../discussions/2026-06-01-agent-orchestrator-rag-integration.md)（本次要接上的 orchestrator + RAG）
