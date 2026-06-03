@@ -16,11 +16,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import streamlit as st
 
-from agents.orchestrator import run_orchestrator
+from agents.orchestrator import retrieve_similar, run_orchestrator
 from shared.data_pipeline import DEFAULT_RAW_DIR, data_status, run_full_pipeline
 from shared.models import OrderRequest
-
-URGENCY_OPTIONS = ["normal", "rush", "emergency"]  # Urgency = Literal[...] in shared/models
+from ui.order_detail import render_order_card
 
 DEMO_SCENARIOS = {
     "（自訂）": "",
@@ -75,60 +74,100 @@ def _run_conversion(excel_path) -> None:
         st.rerun()
 
 
-def render_sidebar(status) -> None:
-    with st.sidebar:
-        st.header("資料狀態")
-        st.metric("SQLite 表數", status.db_tables)
-        st.metric("RAG CSV 列數", status.csv_rows)
-        st.metric("向量索引筆數", status.chroma_count)
-        if st.button("♻️ 重建資料"):
-            st.session_state.pop("plan", None)
-            st.rerun()
+def render_data_status_tab(status) -> None:
+    st.subheader("資料狀態")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("SQLite 表數", status.db_tables)
+    c2.metric("RAG CSV 列數", status.csv_rows)
+    c3.metric("向量索引筆數", status.chroma_count)
+    if st.button("♻️ 重建資料"):
+        st.session_state.pop("chat", None)
+        st.session_state.pop("search_results", None)
+        st.rerun()
 
 
-def render_main_panel() -> None:
-    st.title("🌱 多 Agent 綠色供應鏈協調系統")
-    left, mid = st.columns([1, 2])
+def _render_plan(plan) -> None:
+    c1, c2, c3 = st.columns(3)
+    c1.metric("💰 預估單價", f"${plan.estimated_price_ntd:,.0f}/噸")
+    low, high = plan.price_confidence
+    c1.caption(f"信心區間 ${low:,.0f} ～ ${high:,.0f}")
+    c2.metric("📅 預估交期", str(plan.estimated_delivery))
+    c3.metric("🏭 產能", plan.capacity_status)
+    if plan.changeover_risk:
+        st.caption(f"換線風險：{plan.changeover_risk}")
 
-    with left:
-        st.subheader("客戶需求輸入")
-        scenario = st.selectbox("Demo 情境", list(DEMO_SCENARIOS.keys()))
-        customer = st.text_input("客戶", value="AWS")
-        raw_text = st.text_area("需求", value=DEMO_SCENARIOS[scenario], height=120)
-        urgency = st.selectbox("急迫度", URGENCY_OPTIONS)
-        if st.button("▶ 跑 Agent"):
-            order = OrderRequest(
-                customer=customer,
-                raw_text=raw_text,
-                received_at=datetime.now(),
-                urgency=urgency,
-            )
-            with st.status("🤖 Agents 協調中…", expanded=False):
-                st.session_state["plan"] = run_orchestrator(order)
+    for risk in plan.risks:
+        st.warning(risk)
 
-    with mid:
-        st.subheader("協調報告")
-        plan = st.session_state.get("plan")
-        if plan is None:
-            st.info("輸入需求後點「▶ 跑 Agent」。")
-        else:
-            c1, c2, c3 = st.columns(3)
-            c1.metric("💰 預估報價", f"${plan.estimated_price:,.0f}")
-            c2.metric("📅 交期", str(plan.estimated_delivery))
-            c3.metric("🌱 碳排", f"{plan.carbon_footprint_kg:,.0f} kg")
-            st.caption("⚠️ W1 stub：報價／碳排為佔位值，待真實 agent 接上")
-            st.markdown("**📊 參考歷史訂單**")
-            if plan.reference_orders:
-                st.dataframe(plan.reference_orders, use_container_width=True)
+    if plan.reference_orders:
+        st.markdown("**📄 參考歷史訂單**")
+        for i, ref in enumerate(plan.reference_orders):
+            render_order_card(ref, key=f"chatref-{id(plan)}-{i}")
+
+    if plan.next_actions:
+        st.markdown("**下一步**")
+        for action in plan.next_actions:
+            st.write(f"- {action}")
+
+
+def render_chat_tab() -> None:
+    st.subheader("💬 協調聊天")
+    chat = st.session_state.setdefault("chat", [])
+
+    cols = st.columns(len(DEMO_SCENARIOS))
+    for col, (name, text) in zip(cols, DEMO_SCENARIOS.items()):
+        if text and col.button(name, key=f"demo-{name}"):
+            st.session_state["prefill"] = text
+    customer = st.text_input("客戶名稱（選填）")
+
+    for msg in chat:
+        with st.chat_message(msg["role"]):
+            if msg["role"] == "user":
+                st.write(msg["text"])
             else:
-                st.caption("（無參考訂單）")
-            if plan.risks:
-                for risk in plan.risks:
-                    st.warning(risk)
-            if plan.next_actions:
-                st.markdown("**下一步**")
-                for action in plan.next_actions:
-                    st.write(f"- {action}")
+                _render_plan(msg["plan"])
+
+    prompt = st.chat_input("輸入客戶需求…") or st.session_state.pop("prefill", None)
+    if not prompt:
+        return
+
+    chat.append({"role": "user", "text": prompt})
+    order = OrderRequest(
+        customer=customer or "未具名客戶",
+        raw_text=prompt,
+        received_at=datetime.now(),
+        urgency=None,
+    )
+    try:
+        with st.status("🤖 Agents 協調中…", expanded=False):
+            plan = run_orchestrator(order)
+    except Exception as exc:  # noqa: BLE001 — surface failure, keep conversation
+        st.error(f"協調失敗：{type(exc).__name__}: {exc}")
+        return
+    chat.append({"role": "assistant", "plan": plan})
+    st.rerun()
+
+
+def render_search_tab() -> None:
+    st.subheader("🔍 歷史訂單檢索")
+    query = st.text_input("搜尋歷史訂單（規格 / 客戶 / 描述）")
+    k = st.slider("回傳筆數", min_value=1, max_value=10, value=5)
+    if st.button("搜尋", disabled=not query.strip()):
+        try:
+            with st.spinner("檢索中…"):
+                st.session_state["search_results"] = retrieve_similar(query, k=k)
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"檢索失敗（請先在「資料狀態」頁完成轉檔）：{type(exc).__name__}: {exc}")
+            return
+
+    results = st.session_state.get("search_results")
+    if results is None:
+        st.info("輸入關鍵字後點「搜尋」。")
+    elif not results:
+        st.caption("（查無相似訂單）")
+    else:
+        for i, record in enumerate(results):
+            render_order_card(record, key=f"search-{i}")
 
 
 def main() -> None:
@@ -136,8 +175,15 @@ def main() -> None:
     if not (status.db_ready and status.csv_ready and status.chroma_ready):
         render_gate(status)
         return
-    render_sidebar(status)
-    render_main_panel()
+
+    st.title("🌱 多 Agent 綠色供應鏈協調系統")
+    tab_status, tab_chat, tab_search = st.tabs(["🗂️ 資料狀態", "💬 協調聊天", "🔍 歷史訂單檢索"])
+    with tab_status:
+        render_data_status_tab(status)
+    with tab_chat:
+        render_chat_tab()
+    with tab_search:
+        render_search_tab()
 
 
 main()

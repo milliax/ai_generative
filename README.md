@@ -108,7 +108,8 @@
 ├── shared/
 │   └── data_pipeline.py            # 啟動偵測 + 轉檔串接（UI 唯一介面）
 ├── ui/
-│   └── streamlit_app.py            # 啟動 gate + 轉檔 + 協調 panel
+│   ├── streamlit_app.py            # 啟動 gate + 轉檔 + 3 tab 主畫面
+│   └── order_detail.py             # 共用：歷史訂單詳情 modal + 卡片
 ├── raw_data/                       # gitignore；放老師原始 xlsx
 ├── data/                           # gitignore；轉檔產物（SQLite / CSV）
 └── tests/
@@ -117,16 +118,20 @@
 ## 七、起步
 
 ```bash
-# 安裝（之後 PM 會放 requirements.txt）
-pip install litellm langgraph chromadb fastapi streamlit pandas pydantic
+# 一鍵：安裝依賴 + 啟動 UI（從專案根目錄）
+./run.sh
 
-# 設定環境變數
-cp .env.example .env
-# 編輯 .env，填入你自己的 LLM provider key（OpenAI / Gemini / Anthropic 擇一）
-
-# 跑 UI
+# 或手動
+pip install -r requirements.txt
+cp .env.example .env   # 編輯 .env，填入你自己的 LLM provider key（Gemini / OpenAI / Anthropic 擇一）
 streamlit run ui/streamlit_app.py
 ```
+
+資料閘門通過後，主畫面有 3 個 tab：
+
+- **🗂️ 資料狀態**：SQLite / RAG CSV / 向量索引筆數，可重建資料
+- **💬 協調聊天**：輸入客戶需求 → 跑 orchestrator → 協調報告（估價 / 交期 / 產能 / 風險），下方列出參考的歷史訂單，可點進詳情
+- **🔍 歷史訂單檢索**：關鍵字語意檢索歷史訂單（RAG），逐筆點進詳情
 
 ## 八、討論記錄
 
