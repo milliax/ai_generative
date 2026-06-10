@@ -228,8 +228,12 @@ def render_order_tab() -> None:
                 spec_diff={},
             )
             try:
-                with st.status("🤖 Agents 協調中…", expanded=False):
+                with st.status("🤖 Agents 協調中…", expanded=True) as box:
+                    st.write("🧠 思考中…")
+                    st.write("🔎 檢索歷史訂單資料庫（RAG）…")
+                    st.write("📊 依相似案例推估報價與交期…")
                     plan = run_orchestrator(spec=spec)
+                    box.update(label="✅ 協調完成", state="complete", expanded=False)
             except Exception as exc:  # noqa: BLE001 — surface failure, keep history
                 st.error(f"協調失敗：{type(exc).__name__}: {exc}")
             else:
